@@ -188,47 +188,47 @@ class StorageController extends Controller
     }
 
     public function delete(Request $request)
-{
-    $secret = $request->input('secret');
+    {
+        $secret = $request->input('secret');
 
-    if ($secret !== env('SERVER_SECRET_KEY')) {
-        return response()->json([
-            'success' => false,
-            'message' => 'Unauthorized'],
-            401);
+        if ($secret !== env('SERVER_SECRET_KEY')) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Unauthorized'],
+                401);
+        }
+
+        $bucket = $this->getBucketName();
+        $url = $request->input('file');
+
+        if (!$url) {
+            return response()->json([
+                'success' => false,
+                'message' => 'File URL kosong'],
+                400);
+        }
+
+        $parsedUrl = parse_url($url, PHP_URL_PATH);
+        $key = ltrim(str_replace('/' . $bucket . '/', '', $parsedUrl), '/');
+
+        try {
+            $this->s3->deleteObject([
+                'Bucket' => $bucket,
+                'Key'    => $key,
+            ]);
+
+            return response()->json([
+                'success' => true,
+                'message' => 'File deleted successfully'
+            ],
+            200);
+        } catch (\Aws\Exception\AwsException $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Gagal menghapus file: ' . $e->getMessage()
+            ],
+            500);
+        }
     }
-
-    $bucket = $this->getBucketName();
-    $url = $request->input('file');
-
-    if (!$url) {
-        return response()->json([
-            'success' => false,
-            'message' => 'File URL kosong'],
-            400);
-    }
-
-    $parsedUrl = parse_url($url, PHP_URL_PATH);
-    $key = ltrim(str_replace('/' . $bucket . '/', '', $parsedUrl), '/');
-
-    try {
-        $this->s3->deleteObject([
-            'Bucket' => $bucket,
-            'Key'    => $key,
-        ]);
-
-        return response()->json([
-            'success' => true,
-            'message' => 'File deleted successfully'
-        ],
-        200);
-    } catch (\Aws\Exception\AwsException $e) {
-        return response()->json([
-            'success' => false,
-            'message' => 'Gagal menghapus file: ' . $e->getMessage()
-        ],
-        500);
-    }
-}
 
 }
