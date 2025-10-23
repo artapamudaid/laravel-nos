@@ -6,7 +6,7 @@ use App\Http\Controllers\StorageController;
 
 Route::post('upload', [StorageController::class, 'upload']);
 Route::get('list', [StorageController::class, 'list']);
-Route::delete('delete', [StorageController::class, 'delete']);
-Route::get('download', [StorageController::class, 'download']);
+Route::post('view', [StorageController::class, 'view']);
+Route::post('delete', [StorageController::class, 'delete']);
 
 
