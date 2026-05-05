@@ -54,51 +54,35 @@ class ProcessS3Upload implements ShouldQueue
     }
 
     /**
-     * Resolve the actual file content to upload.
-     *
-     * Supports two modes:
-     * - Legacy: $fileContent is a temp file path (storage/app/temp/...)
-     * - Current: $fileContent is the raw binary content of the file
+     * Resolve the actual file content to upload from disk.
+     * 
+     * RAM-Safe: We read from disk only when needed and clear memory immediately.
      */
     protected function resolveFileContent(): string
     {
-        // Heuristic: if it looks like a file path and the file exists on disk, treat it as legacy temp-file mode
-        if (
-            is_string($this->fileContent) &&
-            strlen($this->fileContent) < 512 &&
-            !str_contains($this->fileContent, "\0") &&
-            (
-                str_starts_with($this->fileContent, '/') ||
-                str_starts_with($this->fileContent, 'temp/')
-            )
-        ) {
-            // Resolve absolute path
-            $absolutePath = str_starts_with($this->fileContent, '/')
-                ? $this->fileContent
-                : storage_path('app/' . $this->fileContent);
-
-            if (!file_exists($absolutePath)) {
-                // Temp file sudah hilang — skip job ini, jangan retry lagi
-                Log::warning("Legacy temp file no longer exists, discarding job", [
-                    'path'   => $absolutePath,
-                    'client' => $this->client,
-                    'file'   => $this->fileName,
-                ]);
-                $this->delete(); // hapus job dari queue tanpa exception
-                return '';
-            }
-
-            Log::info("Legacy temp file detected, reading from disk", ['path' => $absolutePath]);
-            $content = file_get_contents($absolutePath);
-
-            // Cleanup temp file setelah dibaca
-            @unlink($absolutePath);
-
-            return $content;
+        if (!is_string($this->fileContent)) {
+            Log::error("Invalid file content type", ['type' => gettype($this->fileContent)]);
+            return '';
         }
 
-        // Mode saat ini: fileContent adalah base64-encoded binary
-        return base64_decode($this->fileContent);
+        // Gunakan path langsung karena sekarang dikirim dalam bentuk absolut dari Controller
+        $absolutePath = $this->fileContent;
+
+        if (!file_exists($absolutePath)) {
+            Log::warning("Temp file not found, possibly already processed or deleted", [
+                'path'   => $absolutePath,
+                'client' => $this->client,
+                'file'   => $this->fileName,
+            ]);
+            // Don't retry if file is missing
+            $this->delete();
+            return '';
+        }
+
+        $content = file_get_contents($absolutePath);
+
+        // JANGAN hapus di sini, hapus setelah S3 konfirmasi sukses di handle()
+        return $content;
     }
 
     /**
@@ -170,6 +154,15 @@ class ProcessS3Upload implements ShouldQueue
                 'client' => $this->client,
                 'size' => $this->fileSize,
             ]);
+
+            // SEKARANG baru aman untuk menghapus file di disk
+            $absolutePath = str_starts_with($this->fileContent, '/')
+                ? $this->fileContent
+                : storage_path('app/' . $this->fileContent);
+            
+            if (file_exists($absolutePath)) {
+                @unlink($absolutePath);
+            }
 
         } catch (AwsException $e) {
             Log::error("Queue upload AWS error: " . $e->getMessage(), [

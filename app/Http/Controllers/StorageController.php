@@ -7,6 +7,7 @@ use Aws\S3\S3Client;
 use Aws\Exception\AwsException;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Storage;
 use App\Jobs\ProcessS3Upload;
 use Illuminate\Support\Str;
 
@@ -139,20 +140,37 @@ class StorageController extends Controller
             $mimeType = $file->getMimeType();
             $fileSize = $file->getSize();
 
-            // Generate unique filename dengan UUID
-            $randomName = Str::uuid() . '.' . $ext;
+            // Otomatis urus folder temp menggunakan Driver Local agar sesuai config (storage/app/private)
+            $disk = Storage::disk('local');
+            if (!$disk->exists('temp')) {
+                $disk->makeDirectory('temp');
+            }
 
-            // Read file content dan encode ke base64 agar aman disimpan di JSON queue
-            // Raw binary tidak bisa di-JSON encode (Malformed UTF-8 error)
-            $fileContent = base64_encode(file_get_contents($file->getPathname()));
+            // Simpan file ke disk temporary (Hemat RAM)
+            $randomName = Str::uuid() . '.' . $ext;
+            $savePath = $file->storeAs('temp', $randomName, 'local');
+            
+            if (!$savePath) {
+                Log::error("CRITICAL: storeAs gagal!");
+                throw new \Exception("Gagal menulis file ke storage server.");
+            }
+
+            // Dapatkan path absolut yang benar (Laravel akan otomatis arahkan ke folder private jika sesuai config)
+            $tempPath = $disk->path($savePath);
+
+            // DEBUG: Pastikan file benar-baru ada
+            if (!file_exists($tempPath)) {
+                Log::error("CRITICAL: File tidak terbaca!", ['path' => $tempPath]);
+                throw new \Exception("File tidak ditemukan di sistem: " . $tempPath);
+            }
 
             // Generate URL sebelum upload
             $key = $client . "/uploads/" . ($folder ? $folder . "/" : "") . $randomName;
             $url = env('NEO_ENDPOINT') . "/" . $bucket . "/" . $key;
 
-            // Dispatch async job to queue dengan file content
+            // Dispatch async job ke queue dengan Path Absolut
             ProcessS3Upload::dispatch(
-                $fileContent,
+                $tempPath,
                 $randomName,
                 $mimeType,
                 $client,
@@ -162,27 +180,27 @@ class StorageController extends Controller
                 $fileSize
             );
 
-            Log::info("File queued for upload - instant URL returned", [
+            Log::info("File queued for upload (Path Mode)", [
                 'url' => $url,
                 'client' => $client,
                 'size' => $fileSize,
             ]);
 
-            // Return URL langsung ke client dengan status 202 (Accepted)
+            // Return URL langsung ke client (202 Accepted)
             return response()->json(
                 [
                     'success' => true,
-                    'message' => 'Sukses Upload',
+                    'message' => 'Sukses Upload (Queued)',
                     'url' => $url
                 ],
                 202
             );
         } catch (\Exception $e) {
-            Log::error("Upload queue dispatch failed: " . $e->getMessage());
+            Log::error("Upload failed: " . $e->getMessage());
             return response()->json(
                 [
                     'success' => false,
-                    'message' => 'Failed to queue upload: ' . $e->getMessage()
+                    'message' => 'Upload failed: ' . $e->getMessage()
                 ],
                 500
             );
