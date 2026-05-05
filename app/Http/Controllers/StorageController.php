@@ -62,11 +62,47 @@ class StorageController extends Controller
             if (!$exists) {
                 $this->s3->createBucket(['Bucket' => $bucket]);
             }
+
+            // Set bucket policy agar semua object bisa diakses publik
+            // NOS tidak mendukung ACL per-object, sehingga policy bucket diperlukan
+            $this->applyPublicReadPolicy($bucket);
+
             // Cache hasil untuk 1 jam
             Cache::put($cacheKey, true, 3600);
         } catch (AwsException $e) {
             Log::error("Bucket check/create failed: " . $e->getMessage());
             throw new \Exception("Bucket check/create failed: " . $e->getMessage());
+        }
+    }
+
+    /**
+     * Set bucket policy agar seluruh object bisa dibaca publik.
+     * Digunakan karena NOS tidak mendukung ACL (Access Control List) per-object.
+     */
+    private function applyPublicReadPolicy($bucket)
+    {
+        $policy = json_encode([
+            'Version' => '2012-10-17',
+            'Statement' => [
+                [
+                    'Sid'       => 'PublicReadGetObject',
+                    'Effect'    => 'Allow',
+                    'Principal' => '*',
+                    'Action'    => 's3:GetObject',
+                    'Resource'  => "arn:aws:s3:::{$bucket}/*",
+                ],
+            ],
+        ]);
+
+        try {
+            $this->s3->putBucketPolicy([
+                'Bucket' => $bucket,
+                'Policy' => $policy,
+            ]);
+            Log::info("Bucket public-read policy applied", ['bucket' => $bucket]);
+        } catch (AwsException $e) {
+            // Jika NOS tidak support putBucketPolicy, log warning tapi tidak throw
+            Log::warning("Could not apply bucket policy: " . $e->getMessage(), ['bucket' => $bucket]);
         }
     }
 
@@ -106,17 +142,16 @@ class StorageController extends Controller
             // Generate unique filename dengan UUID
             $randomName = Str::uuid() . '.' . $ext;
 
-            // Store file temporarily
-            $tempPath = $file->store('temp');
-            $fullTempPath = storage_path('app/' . $tempPath);
+            // Read file content
+            $fileContent = file_get_contents($file->getPathname());
 
-            // Generate URL sebelum upload (URL sudah pasti berdasarkan UUID)
+            // Generate URL sebelum upload
             $key = $client . "/uploads/" . ($folder ? $folder . "/" : "") . $randomName;
             $url = env('NEO_ENDPOINT') . "/" . $bucket . "/" . $key;
 
-            // Dispatch async job to queue untuk upload di background
+            // Dispatch async job to queue dengan file content
             ProcessS3Upload::dispatch(
-                $fullTempPath,
+                $fileContent,
                 $randomName,
                 $mimeType,
                 $client,
@@ -130,14 +165,13 @@ class StorageController extends Controller
                 'url' => $url,
                 'client' => $client,
                 'size' => $fileSize,
-                'temp_path' => $tempPath,
             ]);
 
             // Return URL langsung ke client dengan status 202 (Accepted)
             return response()->json(
                 [
                     'success' => true,
-                    'message' => 'File queued for upload',
+                    'message' => 'Sukses Upload',
                     'url' => $url
                 ],
                 202

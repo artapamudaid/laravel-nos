@@ -11,13 +11,13 @@ use Aws\S3\S3Client;
 use Aws\Exception\AwsException;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Cache;
-use Symfony\Component\HttpFoundation\File\UploadedFile;
+use Illuminate\Support\Facades\Storage;
 
 class ProcessS3Upload implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    protected $filePath;
+    protected $fileContent;
     protected $fileName;
     protected $mimeType;
     protected $client;
@@ -34,7 +34,7 @@ class ProcessS3Upload implements ShouldQueue
      * Create a new job instance.
      */
     public function __construct(
-        string $filePath,
+        string $fileContent,
         string $fileName,
         string $mimeType,
         string $client,
@@ -43,7 +43,7 @@ class ProcessS3Upload implements ShouldQueue
         string $originalName,
         int $fileSize
     ) {
-        $this->filePath = $filePath;
+        $this->fileContent = $fileContent;
         $this->fileName = $fileName;
         $this->mimeType = $mimeType;
         $this->client = $client;
@@ -51,6 +51,54 @@ class ProcessS3Upload implements ShouldQueue
         $this->bucket = $bucket;
         $this->originalName = $originalName;
         $this->fileSize = $fileSize;
+    }
+
+    /**
+     * Resolve the actual file content to upload.
+     *
+     * Supports two modes:
+     * - Legacy: $fileContent is a temp file path (storage/app/temp/...)
+     * - Current: $fileContent is the raw binary content of the file
+     */
+    protected function resolveFileContent(): string
+    {
+        // Heuristic: if it looks like a file path and the file exists on disk, treat it as legacy temp-file mode
+        if (
+            is_string($this->fileContent) &&
+            strlen($this->fileContent) < 512 &&
+            !str_contains($this->fileContent, "\0") &&
+            (
+                str_starts_with($this->fileContent, '/') ||
+                str_starts_with($this->fileContent, 'temp/')
+            )
+        ) {
+            // Resolve absolute path
+            $absolutePath = str_starts_with($this->fileContent, '/')
+                ? $this->fileContent
+                : storage_path('app/' . $this->fileContent);
+
+            if (!file_exists($absolutePath)) {
+                // Temp file sudah hilang — skip job ini, jangan retry lagi
+                Log::warning("Legacy temp file no longer exists, discarding job", [
+                    'path'   => $absolutePath,
+                    'client' => $this->client,
+                    'file'   => $this->fileName,
+                ]);
+                $this->delete(); // hapus job dari queue tanpa exception
+                return '';
+            }
+
+            Log::info("Legacy temp file detected, reading from disk", ['path' => $absolutePath]);
+            $content = file_get_contents($absolutePath);
+
+            // Cleanup temp file setelah dibaca
+            @unlink($absolutePath);
+
+            return $content;
+        }
+
+        // Mode saat ini: fileContent sudah berupa binary content
+        return $this->fileContent;
     }
 
     /**
@@ -82,26 +130,36 @@ class ProcessS3Upload implements ShouldQueue
             // Ensure bucket exists
             $cacheKey = "s3_bucket_exists_{$this->bucket}";
             if (!Cache::has($cacheKey)) {
-                $exists = $s3->doesBucketExist($this->bucket);
-                if (!$exists) {
-                    $s3->createBucket(['Bucket' => $this->bucket]);
+                try {
+                    $exists = $s3->doesBucketExist($this->bucket);
+                    if (!$exists) {
+                        $s3->createBucket(['Bucket' => $this->bucket]);
+                    }
+                    Cache::put($cacheKey, true, 3600);
+                } catch (\Exception $e) {
+                    Log::warning("Bucket check warning: " . $e->getMessage());
                 }
-                Cache::put($cacheKey, true, 3600);
             }
 
-            // Upload to S3
+            // Resolve file content (support legacy temp-file path & current binary mode)
+            $body = $this->resolveFileContent();
+
+            // Job sudah di-delete() dari dalam resolveFileContent() jika temp file tidak ada
+            if ($body === '') {
+                return;
+            }
+
+            // Upload to S3 using Body (file content)
             $key = $this->client . "/uploads/" . ($this->folder ? $this->folder . "/" : "") . $this->fileName;
 
             $s3->putObject([
                 'Bucket' => $this->bucket,
                 'Key'    => $key,
-                'SourceFile' => $this->filePath,
-                'ACL'    => 'public-read',
+                'Body'   => $body,
                 'ContentType' => $this->mimeType,
                 'Metadata' => [
                     'uploaded_at' => now()->toDateTimeString(),
                     'original_name' => $this->originalName,
-                    'job_id' => $this->job->getJobId() ?? 'unknown',
                 ]
             ]);
 
@@ -111,38 +169,21 @@ class ProcessS3Upload implements ShouldQueue
                 'url' => $url,
                 'client' => $this->client,
                 'size' => $this->fileSize,
-                'job_id' => $this->job->getJobId() ?? 'unknown',
             ]);
 
-            // Cleanup temp file
-            if (file_exists($this->filePath)) {
-                @unlink($this->filePath);
-            }
-
         } catch (AwsException $e) {
-            Log::error("Queue upload failed: " . $e->getMessage(), [
+            Log::error("Queue upload AWS error: " . $e->getMessage(), [
                 'code' => $e->getAwsErrorCode(),
                 'client' => $this->client,
                 'attempt' => $this->attempts(),
             ]);
-
-            // Cleanup on failure
-            if (file_exists($this->filePath)) {
-                @unlink($this->filePath);
-            }
-
             throw $e;
         } catch (\Exception $e) {
-            Log::error("Queue upload exception: " . $e->getMessage(), [
+            Log::error("Queue upload error: " . $e->getMessage(), [
                 'client' => $this->client,
                 'attempt' => $this->attempts(),
+                'trace' => $e->getTraceAsString(),
             ]);
-
-            // Cleanup on failure
-            if (file_exists($this->filePath)) {
-                @unlink($this->filePath);
-            }
-
             throw $e;
         }
     }
@@ -154,13 +195,8 @@ class ProcessS3Upload implements ShouldQueue
     {
         Log::error("Queue job failed after all retries", [
             'exception' => $exception->getMessage(),
-            'file' => $this->filePath,
             'client' => $this->client,
+            'file_name' => $this->fileName,
         ]);
-
-        // Cleanup temp file
-        if (file_exists($this->filePath)) {
-            @unlink($this->filePath);
-        }
     }
 }
