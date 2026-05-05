@@ -1,0 +1,300 @@
+{
+	"info": {
+		"_postman_id": "laravel-nos-collection",
+		"name": "Laravel NOS - Neo Object Storage",
+		"description": "Collection untuk testing API Laravel NOS Service.\n\nPastikan variable `base_url` dan `secret_key` sudah diisi di Environment.",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"variable": [
+		{
+			"key": "base_url",
+			"value": "https://nos-service.your-domain.com",
+			"type": "string",
+			"description": "Base URL production server"
+		},
+		{
+			"key": "secret_key",
+			"value": "YOUR-SECRET-KEY",
+			"type": "string",
+			"description": "SERVER_SECRET_KEY dari .env"
+		},
+		{
+			"key": "client",
+			"value": "your-app",
+			"type": "string",
+			"description": "Identifier client/tenant"
+		},
+		{
+			"key": "file_url",
+			"value": "",
+			"type": "string",
+			"description": "URL file yang dikembalikan setelah upload (auto-set oleh test script)"
+		}
+	],
+	"item": [
+		{
+			"name": "Upload File",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"// Simpan URL ke variable untuk dipakai di request lain",
+							"if (pm.response.code === 202) {",
+							"    const json = pm.response.json();",
+							"    pm.collectionVariables.set('file_url', json.url);",
+							"    console.log('File URL saved:', json.url);",
+							"}",
+							"",
+							"pm.test('Status 202 Accepted', () => {",
+							"    pm.response.to.have.status(202);",
+							"});",
+							"",
+							"pm.test('Response memiliki url', () => {",
+							"    const json = pm.response.json();",
+							"    pm.expect(json.success).to.be.true;",
+							"    pm.expect(json.url).to.be.a('string').and.not.empty;",
+							"});"
+						],
+						"type": "text/javascript"
+					}
+				}
+			],
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Accept",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "formdata",
+					"formdata": [
+						{
+							"key": "secret",
+							"value": "{{secret_key}}",
+							"type": "text",
+							"description": "Server secret key (wajib)"
+						},
+						{
+							"key": "client",
+							"value": "{{client}}",
+							"type": "text",
+							"description": "Identifier client/tenant (wajib)"
+						},
+						{
+							"key": "folder",
+							"value": "folder",
+							"type": "text",
+							"description": "Sub-folder tujuan (opsional, contoh: folder, profile, dokumen)"
+						},
+						{
+							"key": "file",
+							"type": "file",
+							"src": [],
+							"description": "File yang akan diupload (max 50MB)"
+						}
+					]
+				},
+				"url": {
+					"raw": "{{base_url}}/api/upload",
+					"host": ["{{base_url}}"],
+					"path": ["api", "upload"]
+				},
+				"description": "Upload file ke NOS via queue (async).\n\n**Response langsung dikembalikan (202)** meskipun upload masih diproses di background.\n\nURL yang dikembalikan mungkin belum bisa diakses selama beberapa detik hingga job queue selesai diproses.\n\n**Contoh response:**\n```json\n{\n  \"success\": true,\n  \"message\": \"Sukses Upload\",\n  \"url\": \"https://your-endpoint/your-bucket/your-app/uploads/folder/uuid.jpg\"\n}\n```"
+			},
+			"response": [
+				{
+					"name": "202 - Upload Berhasil (Queued)",
+					"originalRequest": {
+						"method": "POST",
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{"key": "secret", "value": "YOUR-SECRET-KEY", "type": "text"},
+								{"key": "client", "value": "your-app", "type": "text"},
+								{"key": "folder", "value": "folder", "type": "text"},
+								{"key": "file", "type": "file", "src": "foto.jpg"}
+							]
+						},
+						"url": {"raw": "{{base_url}}/api/upload"}
+					},
+					"status": "Accepted",
+					"code": 202,
+					"_postman_previewlanguage": "json",
+					"body": "{\n    \"success\": true,\n    \"message\": \"Sukses Upload\",\n    \"url\": \"https://your-endpoint/your-bucket/your-app/uploads/folder/550e8400-e29b-41d4-a716-446655440000.jpg\"\n}"
+				},
+				{
+					"name": "401 - Unauthorized",
+					"status": "Unauthorized",
+					"code": 401,
+					"_postman_previewlanguage": "json",
+					"body": "{\n    \"success\": false,\n    \"message\": \"Unauthorized\"\n}"
+				},
+				{
+					"name": "422 - Validasi Gagal (file terlalu besar)",
+					"status": "Unprocessable Entity",
+					"code": 422,
+					"_postman_previewlanguage": "json",
+					"body": "{\n    \"message\": \"The file field must not be greater than 51200 kilobytes.\",\n    \"errors\": {\n        \"file\": [\"The file field must not be greater than 51200 kilobytes.\"]\n    }\n}"
+				}
+			]
+		},
+		{
+			"name": "List File",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test('Status 200 OK', () => {",
+							"    pm.response.to.have.status(200);",
+							"});",
+							"",
+							"pm.test('Response berisi array files', () => {",
+							"    const json = pm.response.json();",
+							"    pm.expect(json.success).to.be.true;",
+							"    pm.expect(json.files).to.be.an('array');",
+							"    console.log('Total files:', json.files.length);",
+							"});"
+						],
+						"type": "text/javascript"
+					}
+				}
+			],
+			"request": {
+				"method": "GET",
+				"header": [
+					{"key": "Accept", "value": "application/json"}
+				],
+				"url": {
+					"raw": "{{base_url}}/api/list?secret={{secret_key}}&client={{client}}&folder=folder",
+					"host": ["{{base_url}}"],
+					"path": ["api", "list"],
+					"query": [
+						{"key": "secret", "value": "{{secret_key}}", "description": "Server secret key (wajib)"},
+						{"key": "client", "value": "{{client}}", "description": "Identifier client/tenant (wajib)"},
+						{"key": "folder", "value": "folder", "description": "Sub-folder (opsional, kosongkan untuk semua file)"}
+					]
+				},
+				"description": "List semua file milik client tertentu dalam folder tertentu."
+			},
+			"response": [
+				{
+					"name": "200 - List File",
+					"status": "OK",
+					"code": 200,
+					"_postman_previewlanguage": "json",
+					"body": "{\n    \"success\": true,\n    \"files\": [\n        \"https://your-endpoint/your-bucket/your-app/uploads/folder/uuid1.jpg\",\n        \"https://your-endpoint/your-bucket/your-app/uploads/folder/uuid2.jpg\"\n    ]\n}"
+				}
+			]
+		},
+		{
+			"name": "View Metadata File",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test('Status 200 OK', () => {",
+							"    pm.response.to.have.status(200);",
+							"});",
+							"",
+							"pm.test('Response berisi metadata file', () => {",
+							"    const json = pm.response.json();",
+							"    pm.expect(json.size).to.be.a('number');",
+							"    pm.expect(json.type).to.be.a('string');",
+							"    console.log('File size:', json.size, 'bytes');",
+							"    console.log('Content type:', json.type);",
+							"});"
+						],
+						"type": "text/javascript"
+					}
+				}
+			],
+			"request": {
+				"method": "POST",
+				"header": [
+					{"key": "Accept", "value": "application/json"},
+					{"key": "Content-Type", "value": "application/json"}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n    \"secret\": \"{{secret_key}}\",\n    \"url\": \"{{file_url}}\"\n}",
+					"options": {"raw": {"language": "json"}}
+				},
+				"url": {
+					"raw": "{{base_url}}/api/view",
+					"host": ["{{base_url}}"],
+					"path": ["api", "view"]
+				},
+				"description": "Lihat metadata file (ukuran, tipe, tanggal upload). `file_url` otomatis terisi setelah request Upload berhasil."
+			},
+			"response": [
+				{
+					"name": "200 - Metadata File",
+					"status": "OK",
+					"code": 200,
+					"_postman_previewlanguage": "json",
+					"body": "{\n    \"url\": \"https://your-endpoint/your-bucket/your-app/uploads/folder/uuid.jpg\",\n    \"key\": \"your-app/uploads/folder/uuid.jpg\",\n    \"size\": 204800,\n    \"type\": \"image/jpeg\",\n    \"last_modified\": \"2026-05-05 04:22:56\"\n}"
+				}
+			]
+		},
+		{
+			"name": "Delete File",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test('Status 200 OK', () => {",
+							"    pm.response.to.have.status(200);",
+							"});",
+							"",
+							"pm.test('File berhasil dihapus', () => {",
+							"    const json = pm.response.json();",
+							"    pm.expect(json.success).to.be.true;",
+							"});"
+						],
+						"type": "text/javascript"
+					}
+				}
+			],
+			"request": {
+				"method": "POST",
+				"header": [
+					{"key": "Accept", "value": "application/json"},
+					{"key": "Content-Type", "value": "application/json"}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n    \"secret\": \"{{secret_key}}\",\n    \"file\": \"{{file_url}}\"\n}",
+					"options": {"raw": {"language": "json"}}
+				},
+				"url": {
+					"raw": "{{base_url}}/api/delete",
+					"host": ["{{base_url}}"],
+					"path": ["api", "delete"]
+				},
+				"description": "Hapus file dari NOS berdasarkan URL lengkap file."
+			},
+			"response": [
+				{
+					"name": "200 - File Dihapus",
+					"status": "OK",
+					"code": 200,
+					"_postman_previewlanguage": "json",
+					"body": "{\n    \"success\": true,\n    \"message\": \"File deleted successfully\"\n}"
+				},
+				{
+					"name": "400 - URL Kosong",
+					"status": "Bad Request",
+					"code": 400,
+					"_postman_previewlanguage": "json",
+					"body": "{\n    \"success\": false,\n    \"message\": \"File URL kosong\"\n}"
+				}
+			]
+		}
+	]
+}
