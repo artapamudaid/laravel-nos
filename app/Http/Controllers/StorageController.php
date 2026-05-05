@@ -142,8 +142,9 @@ class StorageController extends Controller
             // Generate unique filename dengan UUID
             $randomName = Str::uuid() . '.' . $ext;
 
-            // Read file content
-            $fileContent = file_get_contents($file->getPathname());
+            // Read file content dan encode ke base64 agar aman disimpan di JSON queue
+            // Raw binary tidak bisa di-JSON encode (Malformed UTF-8 error)
+            $fileContent = base64_encode(file_get_contents($file->getPathname()));
 
             // Generate URL sebelum upload
             $key = $client . "/uploads/" . ($folder ? $folder . "/" : "") . $randomName;

@@ -97,8 +97,8 @@ class ProcessS3Upload implements ShouldQueue
             return $content;
         }
 
-        // Mode saat ini: fileContent sudah berupa binary content
-        return $this->fileContent;
+        // Mode saat ini: fileContent adalah base64-encoded binary
+        return base64_decode($this->fileContent);
     }
 
     /**
