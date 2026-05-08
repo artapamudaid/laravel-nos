@@ -69,7 +69,7 @@ class StorageController extends Controller
             $this->applyPublicReadPolicy($bucket);
 
             // Cache hasil untuk 1 jam
-            Cache::put($cacheKey, true, 3600);
+            Cache::put($cacheKey, true, 600);
         } catch (AwsException $e) {
             Log::error("Bucket check/create failed: " . $e->getMessage());
             throw new \Exception("Bucket check/create failed: " . $e->getMessage());
@@ -149,7 +149,7 @@ class StorageController extends Controller
             // Simpan file ke disk temporary (Hemat RAM)
             $randomName = Str::uuid() . '.' . $ext;
             $savePath = $file->storeAs('temp', $randomName, 'local');
-            
+
             if (!$savePath) {
                 Log::error("CRITICAL: storeAs gagal!");
                 throw new \Exception("Gagal menulis file ke storage server.");
@@ -168,16 +168,12 @@ class StorageController extends Controller
             $key = $client . "/uploads/" . ($folder ? $folder . "/" : "") . $randomName;
             $url = env('NEO_ENDPOINT') . "/" . $bucket . "/" . $key;
 
-            // Dispatch async job ke queue dengan Path Absolut
+            // Dispatch async job ke queue dengan minimal payload
             ProcessS3Upload::dispatch(
                 $tempPath,
                 $randomName,
-                $mimeType,
                 $client,
-                $folder,
-                $bucket,
-                $originalName,
-                $fileSize
+                $folder
             );
 
             Log::info("File queued for upload (Path Mode)", [

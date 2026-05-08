@@ -17,14 +17,10 @@ class ProcessS3Upload implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    protected $fileContent;
+    protected $filePath;
     protected $fileName;
-    protected $mimeType;
     protected $client;
     protected $folder;
-    protected $bucket;
-    protected $originalName;
-    protected $fileSize;
 
     public $timeout = 300; // 5 minutes
     public $tries = 3; // Retry 3 times on failure
@@ -32,57 +28,75 @@ class ProcessS3Upload implements ShouldQueue
 
     /**
      * Create a new job instance.
+     *
+     * Optimized payload: hanya simpan data essential di Redis
+     * - bucket: ambil dari config saat runtime
+     * - mimeType: detect dari file saat diproses
+     * - originalName & fileSize: opsional untuk logging
      */
     public function __construct(
-        string $fileContent,
+        string $filePath,
         string $fileName,
-        string $mimeType,
         string $client,
-        ?string $folder,
-        string $bucket,
-        string $originalName,
-        int $fileSize
+        ?string $folder = null
     ) {
-        $this->fileContent = $fileContent;
+        $this->filePath = $filePath;
         $this->fileName = $fileName;
-        $this->mimeType = $mimeType;
         $this->client = $client;
         $this->folder = $folder;
-        $this->bucket = $bucket;
-        $this->originalName = $originalName;
-        $this->fileSize = $fileSize;
     }
 
     /**
-     * Resolve the actual file content to upload from disk.
-     * 
-     * RAM-Safe: We read from disk only when needed and clear memory immediately.
+     * Get file content from disk path.
+     *
+     * RAM-Safe: Read from disk only when needed in queue worker.
      */
-    protected function resolveFileContent(): string
+    protected function getFileContent(): string
     {
-        if (!is_string($this->fileContent)) {
-            Log::error("Invalid file content type", ['type' => gettype($this->fileContent)]);
-            return '';
-        }
-
-        // Gunakan path langsung karena sekarang dikirim dalam bentuk absolut dari Controller
-        $absolutePath = $this->fileContent;
-
-        if (!file_exists($absolutePath)) {
-            Log::warning("Temp file not found, possibly already processed or deleted", [
-                'path'   => $absolutePath,
+        if (!file_exists($this->filePath)) {
+            Log::warning("Temp file not found during queue processing", [
+                'path'   => $this->filePath,
                 'client' => $this->client,
                 'file'   => $this->fileName,
             ]);
-            // Don't retry if file is missing
             $this->delete();
             return '';
         }
 
-        $content = file_get_contents($absolutePath);
+        return file_get_contents($this->filePath);
+    }
 
-        // JANGAN hapus di sini, hapus setelah S3 konfirmasi sukses di handle()
-        return $content;
+    /**
+     * Detect MIME type dari file yang sudah tersimpan.
+     *
+     * Harus dipanggil SETELAH memastikan file exists.
+     */
+    protected function detectMimeType(): string
+    {
+        if (!file_exists($this->filePath)) {
+            return 'application/octet-stream';
+        }
+
+        try {
+            $finfo = finfo_open(FILEINFO_MIME_TYPE);
+            if ($finfo === false) {
+                return 'application/octet-stream';
+            }
+            $mimeType = finfo_file($finfo, $this->filePath);
+            finfo_close($finfo);
+            return $mimeType ?: 'application/octet-stream';
+        } catch (\Exception $e) {
+            Log::warning("MIME type detection failed: " . $e->getMessage());
+            return 'application/octet-stream';
+        }
+    }
+
+    /**
+     * Get bucket name dari config (bukan dari queue payload).
+     */
+    protected function getBucket(): string
+    {
+        return env('NEO_BUCKET');
     }
 
     /**
@@ -91,6 +105,15 @@ class ProcessS3Upload implements ShouldQueue
     public function handle(): void
     {
         try {
+            // Verify file exists FIRST sebelum detect MIME type
+            $body = $this->getFileContent();
+            if ($body === '') {
+                return; // File tidak ada, sudah di-delete() dari getFileContent()
+            }
+
+            $bucket = $this->getBucket();
+            $mimeType = $this->detectMimeType(); // Sekarang aman, file sudah verified exist
+
             $s3 = new S3Client([
                 'version'     => 'latest',
                 'region'      => env('NEO_REGION'),
@@ -111,13 +134,13 @@ class ProcessS3Upload implements ShouldQueue
                 ]
             ]);
 
-            // Ensure bucket exists
-            $cacheKey = "s3_bucket_exists_{$this->bucket}";
+            // Ensure bucket exists (cache untuk mengurangi API calls)
+            $cacheKey = "s3_bucket_exists_{$bucket}";
             if (!Cache::has($cacheKey)) {
                 try {
-                    $exists = $s3->doesBucketExist($this->bucket);
+                    $exists = $s3->doesBucketExist($bucket);
                     if (!$exists) {
-                        $s3->createBucket(['Bucket' => $this->bucket]);
+                        $s3->createBucket(['Bucket' => $bucket]);
                     }
                     Cache::put($cacheKey, true, 3600);
                 } catch (\Exception $e) {
@@ -125,43 +148,30 @@ class ProcessS3Upload implements ShouldQueue
                 }
             }
 
-            // Resolve file content (support legacy temp-file path & current binary mode)
-            $body = $this->resolveFileContent();
-
-            // Job sudah di-delete() dari dalam resolveFileContent() jika temp file tidak ada
-            if ($body === '') {
-                return;
-            }
-
-            // Upload to S3 using Body (file content)
+            // Upload to S3
             $key = $this->client . "/uploads/" . ($this->folder ? $this->folder . "/" : "") . $this->fileName;
 
             $s3->putObject([
-                'Bucket' => $this->bucket,
+                'Bucket' => $bucket,
                 'Key'    => $key,
                 'Body'   => $body,
-                'ContentType' => $this->mimeType,
+                'ContentType' => $mimeType,
                 'Metadata' => [
                     'uploaded_at' => now()->toDateTimeString(),
-                    'original_name' => $this->originalName,
                 ]
             ]);
 
-            $url = env('NEO_ENDPOINT') . "/" . $this->bucket . "/" . $key;
+            $url = env('NEO_ENDPOINT') . "/" . $bucket . "/" . $key;
 
             Log::info("File uploaded successfully via queue", [
                 'url' => $url,
                 'client' => $this->client,
-                'size' => $this->fileSize,
+                'size' => strlen($body),
             ]);
 
-            // SEKARANG baru aman untuk menghapus file di disk
-            $absolutePath = str_starts_with($this->fileContent, '/')
-                ? $this->fileContent
-                : storage_path('app/' . $this->fileContent);
-            
-            if (file_exists($absolutePath)) {
-                @unlink($absolutePath);
+            // Hapus file temp setelah upload sukses
+            if (file_exists($this->filePath)) {
+                @unlink($this->filePath);
             }
 
         } catch (AwsException $e) {
@@ -191,5 +201,10 @@ class ProcessS3Upload implements ShouldQueue
             'client' => $this->client,
             'file_name' => $this->fileName,
         ]);
+
+        // Hapus temp file jika masih ada
+        if (file_exists($this->filePath)) {
+            @unlink($this->filePath);
+        }
     }
 }
