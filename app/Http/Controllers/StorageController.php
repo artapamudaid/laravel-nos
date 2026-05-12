@@ -22,7 +22,7 @@ class StorageController extends Controller
         if (self::$instanceCache === null) {
             self::$instanceCache = new S3Client([
                 'version'     => 'latest',
-                'region'      => env('NEO_REGION'),
+                'region'      => env('NEO_REGION', 'wjv-1'),
                 'endpoint'    => env('NEO_ENDPOINT'),
                 'credentials' => [
                     'key'    => env('NEO_ACCESS_KEY'),
@@ -30,7 +30,8 @@ class StorageController extends Controller
                 ],
                 'use_path_style_endpoint' => true,
                 'http' => [
-                    'verify' => env('NEO_USE_SSL'),
+                    // Cast ke boolean: env() mengembalikan string "false", bukan boolean false
+                    'verify' => filter_var(env('NEO_USE_SSL', false), FILTER_VALIDATE_BOOLEAN),
                     'timeout' => 30,
                     'connect_timeout' => 10,
                 ],

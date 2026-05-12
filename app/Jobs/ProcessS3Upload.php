@@ -116,7 +116,7 @@ class ProcessS3Upload implements ShouldQueue
 
             $s3 = new S3Client([
                 'version'     => 'latest',
-                'region'      => env('NEO_REGION'),
+                'region'      => env('NEO_REGION', 'wjv-1'),
                 'endpoint'    => env('NEO_ENDPOINT'),
                 'credentials' => [
                     'key'    => env('NEO_ACCESS_KEY'),
@@ -124,7 +124,8 @@ class ProcessS3Upload implements ShouldQueue
                 ],
                 'use_path_style_endpoint' => true,
                 'http' => [
-                    'verify' => env('NEO_USE_SSL'),
+                    // Cast ke boolean: env() mengembalikan string "false", bukan boolean false
+                    'verify' => filter_var(env('NEO_USE_SSL', false), FILTER_VALIDATE_BOOLEAN),
                     'timeout' => 60,
                     'connect_timeout' => 10,
                 ],
